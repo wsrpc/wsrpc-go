@@ -28,6 +28,7 @@ if (mode === "server") {
   class RPC extends WebSocketAsync {}
   RPC.addRoute("echo", (_socket, params) => params);
   RPC.addRoute("reverse", (socket, params) => socket.call("double", params));
+  RPC.addRoute("callback", (socket, params) => socket.call("double", params));
   RPC.addRoute("fail", () => {
     throw new Error("TypeScript failure");
   });

@@ -33,12 +33,10 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	if echo.Text != "Привет 🐍" || echo.Value != 0 {
-		log.Fatal("echo mismatch")
-	}
-	result, err := client.Method[demo.Value, int]("reverse").Call(ctx, demo.Value{Value: 21})
+	fmt.Printf("Echo: %s %d\n", echo.Text, echo.Value)
+	result, err := client.Method[demo.Value, int]("callback").Call(ctx, demo.Value{Value: 21})
 	if err != nil || result != 42 {
 		log.Fatalf("callback mismatch: %d %v", result, err)
 	}
-	fmt.Println("Go client interoperability passed")
+	fmt.Println("Callback:", result)
 }

@@ -112,6 +112,12 @@ async def reverse(socket, value):
     return await socket.proxy.double(value=value)
 
 
+async def go_client(binary, url):
+    output = await run(binary, "-url", url)
+    assert "Echo: Привет 🐍 0" in output, output
+    assert "Callback: 42" in output, output
+
+
 async def main():
     with tempfile.TemporaryDirectory(prefix="wsrpc-go-interop-") as directory:
         tmp = Path(directory)
@@ -133,17 +139,18 @@ async def main():
 
             Handler.add_route("echo", echo)
             Handler.add_route("reverse", reverse)
+            Handler.add_route("callback", reverse)
             if base is AioServer:
                 app = web.Application()
                 app.router.add_get("/ws/", Handler)
                 async with TestServer(app) as server:
-                    await run(client_binary, "-url", str(server.make_url("/ws/")))
+                    await go_client(client_binary, str(server.make_url("/ws/")))
             else:
                 async with asgi_server(Handler.as_asgi(path="/ws/")) as url:
-                    await run(client_binary, "-url", url)
+                    await go_client(client_binary, url)
             print(f"Go client -> {base.__module__.split('.')[0]} server: passed")
         async with background("node", "interop/js.mjs", "server") as url:
-            await run(client_binary, "-url", url)
+            await go_client(client_binary, url)
             print("Go client -> TypeScript server: passed")
 
 
