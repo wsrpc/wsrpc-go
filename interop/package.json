@@ -1,0 +1,12 @@
+{
+  "name": "wsrpc-go-interoperability",
+  "private": true,
+  "type": "module",
+  "devDependencies": {
+    "@wsrpc/client": "4.5.1",
+    "@wsrpc/server": "4.5.1",
+    "legacy-wsrpc": "npm:@wsrpc/client@4.4.1",
+    "playwright": "^1.64.1",
+    "ws": "^8.22.0"
+  }
+}

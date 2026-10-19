@@ -1,0 +1,7 @@
+WSRPC Go
+Copyright 2026 Dmitry Orlov <orlovdl@gmail.com>
+
+Implements the WSRPC wire protocol used by wsrpc-aiohttp, wsrpc-asgi,
+and wsrpc-ts. The Go implementation is licensed under Apache-2.0.
+The original JavaScript client used by interoperability tests is an npm
+development dependency and retains its MIT license.

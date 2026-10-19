@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<title>Application written against WSRPC 4.4.1</title>
+<script src="/wsrpc.js"></script>
+<script>
+// This consumer uses only the API available in 4.4.1. Keep it identical for both library versions.
+window.applicationDone = (async function () {
+  WSRPC.DEBUG = false;
+  WSRPC.TRACE = false;
+  var rpc = new WSRPC('ws://' + location.host + '/ws/', 25);
+  var connections = 0;
+  var event = rpc.addEventListener('onconnect', function () { connections++; });
+  rpc.addRoute('double', function (args) { return args.value * 2; });
+  rpc.addRoute('deferred', function (args) {
+    var deferred = this;
+    setTimeout(function () { deferred.resolve(args.value * 3); }, 1);
+  }, true);
+  var ready = rpc.onEvent('onconnect');
+  var queued = rpc.call('echo', { text: 'old application', value: 0 });
+  rpc.connect();
+  await ready;
+  var echo = await queued;
+  var callback = await rpc.call('callback', { value: 21 });
+  var deferred = await rpc.call('deferredCallback', { value: 3 });
+  var nested = await rpc.proxy.math.add({ a: 1, b: 2 });
+  var error;
+  try { await rpc.call('failure', {}); } catch (value) { error = value.message; }
+  var binary = rpc.defer();
+  var listener = rpc.addServerEventListener(function (message) {
+    if (message.topic === 'binary') binary.resolve(message.data);
+  });
+  rpc.sendRaw(new Uint8Array([0, 1, 255]));
+  var bytes = await binary.promise;
+  var removed = rpc.removeServerEventListener(listener);
+  var reconnected = rpc.onEvent('onconnect');
+  rpc.destroy();
+  await reconnected;
+  var afterReconnect = await rpc.call('echo', { again: true });
+  rpc.deleteRoute('deferred');
+  rpc.removeEventListener('onconnect', event);
+  return { echo: echo, callback: callback, deferred: deferred, nested: nested, error: error,
+    bytes: bytes, removed: removed, connections: connections, afterReconnect: afterReconnect,
+    state: rpc.state(), stateCode: rpc.stateCode() };
+})();
+</script>
+</html>

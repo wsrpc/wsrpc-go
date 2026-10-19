@@ -1,0 +1,12 @@
+[project]
+name = "wsrpc-go-interop"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+    "wsrpc-aiohttp>=4.1,<5",
+    "wsrpc-asgi[client] @ git+https://github.com/wsrpc/wsrpc-asgi.git@e46a48a7b33f6e0e6b7ad7bcd31557802202378d",
+    "uvicorn>=0.35",
+]
+
+[tool.uv]
+package = false
