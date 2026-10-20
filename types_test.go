@@ -8,7 +8,7 @@ import (
 
 // These compile actual invalid consumers against the public package.
 func TestTypeContractsRejectInvalidConsumers(t *testing.T) {
-	for _, name := range []string{"arguments", "handler", "result"} {
+	for _, name := range []string{"arguments", "handler", "result", "contract_arguments", "contract_handler", "contract_result", "context_value"} {
 		t.Run(name, func(t *testing.T) {
 			cmd := exec.Command("go", "test", "./testdata/invalid/"+name)
 			output, err := cmd.CombinedOutput()

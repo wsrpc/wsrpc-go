@@ -13,99 +13,368 @@ standard library; the `ws` adapter uses
 go get github.com/wsrpc/wsrpc-go@main
 ```
 
-## Server
+## Complete server and client
 
-Register bound methods on already initialized objects. Only explicitly
-registered methods are exposed; other exported methods stay private to your app.
+This example has three files: a contract shared by both programs, a server, and
+a client. Each connection owns a counter and a session. The session is available
+through the same typed context key in the factory, handlers, and their helpers.
+The server also calls a method registered by the client.
+
+Create a module and the three directories:
+
+```sh
+mkdir rpcdemo
+cd rpcdemo
+go mod init example.com/rpcdemo
+go get github.com/wsrpc/wsrpc-go@main
+mkdir api server client
+```
+
+### Shared contract: `api/api.go`
+
+Only argument/result types and route definitions are shared between programs.
+The context keys and session objects below belong to each endpoint locally.
+
+```go
+package api
+
+import wsrpc "github.com/wsrpc/wsrpc-go"
+
+type Value struct {
+    Value int `json:"value"`
+}
+
+type Snapshot struct {
+    Value      int    `json:"value"`
+    Doubled    int    `json:"doubled"`
+    User       string `json:"user"`
+    Calls      int    `json:"calls"`
+    Connection string `json:"connection"`
+}
+
+var (
+    Init   = wsrpc.Define[Value, Snapshot]("counter")
+    Add    = wsrpc.Define[Value, Snapshot]("add").In("counter")
+    Double = wsrpc.Define[Value, int]("double")
+)
+```
+
+`Init` names the bare `counter` route, and `Add` names `counter.add`. Declaring a
+contract does not construct an object: the server's factory controls that.
+The compiler checks the server handler, client arguments, and client result
+against the same `Procedure[P,R]` definition.
+
+### Server: `server/main.go`
+
+`Authorize` creates a session before the WebSocket upgrade. `Factory` constructs
+one counter for that connection and injects a ready logger. Later handlers see
+the same session pointer through their own invocation contexts. Both the counter
+and the shared session protect mutable state with mutexes.
 
 ```go
 package main
 
 import (
     "context"
+    "errors"
     "log"
     "net/http"
+    "os"
+    "sync"
+    "time"
 
+    "example.com/rpcdemo/api"
     wsrpc "github.com/wsrpc/wsrpc-go"
     "github.com/wsrpc/wsrpc-go/ws"
 )
 
-type Echo struct{ Prefix string }
-type Params struct{ Text string `json:"text"` }
-type Result struct{ Text string `json:"text"` }
+type Session struct {
+    User  string // Immutable after authorization.
+    mu    sync.Mutex
+    Calls int
+}
 
-func (s *Echo) Call(_ context.Context, p Params) (Result, error) {
-    return Result{Text: s.Prefix + p.Text}, nil
+// Keep this one key instance: its name is a label, not a global lookup name.
+var SessionKey = wsrpc.NewContextKey[*Session]("session")
+
+type Counter struct {
+    mu     sync.Mutex
+    value  int
+    logger *log.Logger // Initialized once, shared by all counter objects.
+}
+
+func (c *Counter) Init(ctx context.Context, p api.Value) (api.Snapshot, error) {
+    if p.Value < 0 {
+        return api.Snapshot{}, &wsrpc.Failure{
+            Type: "InvalidValue", Message: "initial value must be nonnegative",
+        }
+    }
+    c.mu.Lock()
+    c.value = p.Value
+    value := c.value
+    c.mu.Unlock()
+    return c.snapshot(ctx, value, 0)
+}
+
+func (c *Counter) Add(ctx context.Context, p api.Value) (api.Snapshot, error) {
+    // Pass the incoming context to helpers. Do not hold the state mutex while
+    // waiting for a reverse call: callbacks can make nested calls to this peer.
+    doubled, err := c.doubleOnClient(ctx, p)
+    if err != nil {
+        return api.Snapshot{}, err
+    }
+    c.mu.Lock()
+    c.value += p.Value
+    value := c.value
+    c.mu.Unlock()
+    return c.snapshot(ctx, value, doubled)
+}
+
+func (c *Counter) doubleOnClient(ctx context.Context, p api.Value) (int, error) {
+    session, ok := SessionKey.Get(ctx)
+    if !ok {
+        return 0, errors.New("missing session")
+    }
+    peer, ok := wsrpc.FromContext(ctx)
+    if !ok {
+        return 0, errors.New("missing calling peer")
+    }
+    c.logger.Printf("callback for user=%q peer=%s", session.User, peer.ID)
+    callbackCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+    defer cancel()
+    return api.Double.Call(callbackCtx, peer, p)
+}
+
+func (c *Counter) snapshot(ctx context.Context, value, doubled int) (api.Snapshot, error) {
+    session, ok := SessionKey.Get(ctx)
+    if !ok {
+        return api.Snapshot{}, errors.New("missing session")
+    }
+    call, ok := wsrpc.Current(ctx)
+    if !ok {
+        return api.Snapshot{}, errors.New("missing invocation")
+    }
+    session.mu.Lock()
+    session.Calls++
+    calls := session.Calls
+    session.mu.Unlock()
+    c.logger.Printf("user=%q peer=%s call=%d method=%s value=%d",
+        session.User, call.Peer.ID, call.ID, call.Method, value)
+    return api.Snapshot{
+        Value: value, Doubled: doubled, User: session.User,
+        Calls: calls, Connection: call.Peer.ID,
+    }, nil
 }
 
 func main() {
-    routes := new(wsrpc.Router)
-    service := &Echo{Prefix: "Hello, "}
-    if err := routes.Handle("echo", service.Call); err != nil { log.Fatal(err) }
-    rpc, err := ws.NewServer(ws.ServerOptions{Peer: wsrpc.Options{Routes: routes}})
-    if err != nil { log.Fatal(err) }
+    logger := log.New(os.Stdout, "rpc: ", log.LstdFlags)
+    rpc, err := ws.NewServer(ws.ServerOptions{
+        Authorize: func(r *http.Request) (context.Context, error) {
+            // A display identity for the example; authenticate in real apps.
+            name := r.URL.Query().Get("name")
+            if name == "" {
+                name = "guest"
+            }
+            return SessionKey.With(r.Context(), &Session{User: name}), nil
+        },
+        Peer: wsrpc.Options{
+            Factory: func(peer *wsrpc.Peer, routes *wsrpc.Router) (func(), error) {
+                session, ok := SessionKey.Get(peer.Context())
+                if !ok {
+                    return nil, errors.New("missing session")
+                }
+                logger.Printf("create counter for user=%q peer=%s", session.User, peer.ID)
+                counter := &Counter{logger: logger}
+                if err := api.Init.Handle(routes, counter.Init); err != nil {
+                    return nil, err
+                }
+                if err := api.Add.Handle(routes, counter.Add); err != nil {
+                    return nil, err
+                }
+                return func() {
+                    logger.Printf("cleanup for user=%q peer=%s", session.User, peer.ID)
+                }, nil
+            },
+        },
+    })
+    if err != nil {
+        log.Fatal(err)
+    }
     mux := http.NewServeMux()
     mux.Handle("/ws/", rpc)
     log.Fatal(http.ListenAndServe("127.0.0.1:8000", mux))
 }
 ```
 
-The server implements `http.Handler`, so it also mounts on net/http-compatible
-routers. Authentication runs in HTTP middleware or `ServerOptions.Authorize`
-before the upgrade. Request context values remain available to route handlers.
-Origin checks are enabled; use `OriginPatterns` for permitted cross-origin hosts.
+Factories run before the reader starts. Register methods and initialize objects
+there; start network calls from handlers or `rpc.OnConnect`, after the peer is
+ready. Returning an error or a nil context from `Authorize` rejects the HTTP
+upgrade. Only explicitly registered methods are exposed.
 
-Run complete examples:
+### Client: `client/main.go`
 
-```sh
-go run ./examples/quickstart
-# Or the richer echo/callback/counter demo:
-go run ./examples/server
-```
-
-## Client and reverse calls
+Register the callback before dialing, so it is available as soon as frames arrive.
+The client puts its own value in the connection context. A callback gets that
+local context, even though the server initiated the call.
 
 ```go
-routes := new(wsrpc.Router)
-type Value struct { Value int `json:"value"` }
-err := routes.Handle("double", func(_ context.Context, p Value) (int, error) {
-    return p.Value * 2, nil
-})
-if err != nil { return err }
+package main
 
-ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-defer cancel()
-peer, err := ws.Dial(ctx, "ws://127.0.0.1:8000/ws/", wsrpc.Options{Routes: routes})
-if err != nil { return err }
-defer func() { _ = peer.Close(); peer.Wait() }()
+import (
+    "context"
+    "flag"
+    "fmt"
+    "log"
+    "time"
 
-result, err := peer.Call[int](ctx, "callback", Value{Value: 21}) // 42
+    "example.com/rpcdemo/api"
+    wsrpc "github.com/wsrpc/wsrpc-go"
+    "github.com/wsrpc/wsrpc-go/ws"
+)
+
+var ClientLabel = wsrpc.NewContextKey[string]("client label")
+
+func main() {
+    url := flag.String("url", "ws://127.0.0.1:8000/ws/?name=alice", "RPC endpoint")
+    flag.Parse()
+    if err := run(*url); err != nil {
+        log.Fatal(err)
+    }
+}
+
+func run(url string) error {
+    routes := new(wsrpc.Router)
+    if err := api.Double.Handle(routes, func(ctx context.Context, p api.Value) (int, error) {
+        label, _ := ClientLabel.Get(ctx)
+        call, _ := wsrpc.Current(ctx)
+        fmt.Printf("callback: label=%q method=%s\n", label, call.Method)
+        return p.Value * 2, nil
+    }); err != nil {
+        return err
+    }
+
+    connectionCtx := ClientLabel.With(context.Background(), "CLI connection")
+    handshakeCtx, stopHandshake := context.WithTimeout(connectionCtx, 5*time.Second)
+    peer, err := ws.Dial(handshakeCtx, url, wsrpc.Options{Routes: routes})
+    stopHandshake() // Dial's deadline controls only the handshake.
+    if err != nil {
+        return err
+    }
+    defer func() { _ = peer.Close(); peer.Wait() }()
+
+    // Each operation has a local wait deadline, independent of connection lifetime.
+    ctx, cancel := context.WithTimeout(connectionCtx, 5*time.Second)
+    defer cancel()
+    init, add := api.Init.Bind(peer), api.Add.Bind(peer)
+    first, err := init.Call(ctx, api.Value{Value: 10})
+    if err != nil {
+        return err
+    }
+    printSnapshot(first)
+    for _, delta := range []int{2, 3} {
+        next, err := add.Call(ctx, api.Value{Value: delta})
+        if err != nil {
+            return err
+        }
+        printSnapshot(next)
+    }
+    return nil
+}
+
+func printSnapshot(s api.Snapshot) {
+    fmt.Printf("value=%d doubled=%d user=%s calls=%d connection=%s\n",
+        s.Value, s.Doubled, s.User, s.Calls, s.Connection)
+}
 ```
 
-Inside a handler, `wsrpc.FromContext(ctx)` returns the calling peer. That peer
-can call the remote client while the original request is still running. The
-reader stays live during handlers and events, including nested callbacks.
-The example [client](examples/client/main.go) runs against Python, TS, or Go.
+Start the server, then run clients in another terminal:
 
-`Dial` uses its context for the handshake. Each call receives its own context;
-cancelling a call's local wait keeps the connection open. Use `Close` to end the
-connection. The shared wire protocol has no remote cancellation frame, so a
-local timeout does not forcibly cancel remote application work.
+```sh
+go run ./server
+go run ./client
+go run ./client -url 'ws://127.0.0.1:8000/ws/?name=bob'
+```
+
+The server command keeps running; issue the two client commands in the second
+terminal. Each client prints the following, with its own user and connection ID:
+
+```text
+value=10 doubled=0 user=alice calls=1 connection=<same ID for these three calls>
+callback: label="CLI connection" method=double
+value=12 doubled=4 user=alice calls=2 connection=<same ID for these three calls>
+callback: label="CLI connection" method=double
+value=15 doubled=6 user=alice calls=3 connection=<same ID for these three calls>
+```
+
+Bob starts at 10 with `calls=1`; he does not inherit Alice's counter or session.
+The factory's cleanup runs once after that connection closes and its handlers
+finish. Return the object's resource-release function there when it owns resources.
+
+### What the shared context means
+
+A connection has a common **local parent context**, and each incoming call adds
+its own `{Peer, ID, Method}` invocation. The factory, callbacks on that endpoint,
+handlers, and helpers can read values inherited from that parent. Storing a
+pointer such as `*Session` shares the same object, not a copy of its fields.
+
+| Where | Context to use | Values and lifetime |
+| --- | --- | --- |
+| Server HTTP authorization | `r.Context()` → `SessionKey.With(...)` | One new session per accepted request. |
+| Connection factory | `peer.Context()` | Same session; HTTP cancellation is detached at upgrade. |
+| Incoming method/helper | The handler's `ctx` | Same session plus this call's invocation metadata. Derived contexts preserve both. |
+| Server reverse call | `api.Double.Call(ctx, peer, params)` | `ctx` bounds the local wait. The wire carries the method, ID and parameters. |
+| Client callback | The callback's `ctx` | Client connection values plus a new incoming invocation, not the server's session. |
+| Connection close | `peer.Close()` followed by `peer.Wait()` | Cancels connection work, joins handlers and runs factory cleanup. |
+
+`Snapshot.User` and `Snapshot.Calls` reach the client because the handler
+explicitly returns those fields as RPC data. The `Session` pointer, context keys,
+and arbitrary context values are not transmitted. The server cannot read
+`ClientLabel`; a client callback cannot read the server's session.
+
+Use the same key instance throughout an endpoint. Calling
+`NewContextKey[*Session]("session")` again makes a distinct key, even with the same
+label. `With` derives a context; it does not modify existing contexts. To share
+mutable connection state, put one pointer in the parent before creating the peer
+and synchronize its fields, as above. Pass the handler's `ctx` to helpers instead
+of replacing it with `context.Background()` or `peer.Context()`; the latter loses
+the individual call metadata.
+
+Caller deadlines and cancellation are local too: timing out a wait does not
+forcibly stop remote work or close the shared connection. Derive a server-side
+timeout where a handler needs one, as `doubleOnClient` does.
+
+Ready-to-run repository examples: [objects/context](examples/objects/README.md),
+[quickstart](examples/quickstart/main.go), and the interoperable
+[server](examples/server/main.go) / [client](examples/client/main.go).
 
 ## Typed contracts and namespaces
 
-`Router.Handle` infers parameter and result types from the function or bound
-method. `Peer.Call[R]` checks the result type selected by the caller; the method
-name is still a runtime string. Bind both argument and result types with:
+Declare a route's name and parameter/result types once and share that contract
+between server and client. No schema language, generated code, or reflection is
+needed:
 
 ```go
-add := peer.Method[Value, int]("counter.add")
-value, err := add.Call(ctx, Value{Value: 2})
-// add.Call(ctx, "wrong") does not compile.
+// Use the contract from api/api.go on both endpoints.
+// Server: register a method on the existing stateful object.
+err := api.Add.Handle(routes, counter.Add)
 
-value, err = peer.Remote("counter").Call[int](ctx, "add", Value{Value: 2})
+// Client: the argument is api.Value and the result is api.Snapshot.
+snapshot, err := api.Add.Call(ctx, peer, api.Value{Value: 2})
+// api.Add.Call(ctx, peer, "wrong") does not compile.
+
+// Or bind once for repeated calls on a connection:
+add := api.Add.Bind(peer)
+snapshot, err = add.Call(ctx, api.Value{Value: 3})
 ```
 
+`Procedure[P,R]` is an immutable value independent of a connection. `In` returns
+a new descriptor with a dotted prefix; `Name` exposes its wire name. `Define`
+panics for an invalid static name. `Handle` checks the handler signature at compile
+time and returns an error for invalid/duplicate registration. The zero descriptor
+is invalid. Binding a contract borrows a peer and creates no remote object.
+
+The lower-level `Router.Handle`, `Peer.Call[R]`, `Peer.Method[P,R]`, and
+`Remote(namespace).Call[R]` remain available for runtime-selected routes.
 Go has no JavaScript-style dynamic property proxy. Named Go methods can wrap
 these typed handles when your application needs `counter.Add(ctx, args)`.
 Type information does not validate an independently deployed server's schema;
@@ -121,6 +390,23 @@ For state owned by a connection, use `Options.Factory`. It runs once per peer,
 adds routes to that connection's router, and returns an optional cleanup function.
 See [Counter](internal/demo/routes.go) for a complete, synchronized example.
 
+To share the tutorial's counter across connections, construct it once before
+`ws.NewServer` and register it in the base router instead of in `Factory`:
+
+```go
+shared := &Counter{logger: logger}
+routes := new(wsrpc.Router)
+if err := api.Init.Handle(routes, shared.Init); err != nil { log.Fatal(err) }
+if err := api.Add.Handle(routes, shared.Add); err != nil { log.Fatal(err) }
+peerOptions := wsrpc.Options{Routes: routes}
+// Use Peer: peerOptions in the same ServerOptions; keep Authorize unchanged.
+```
+
+Now all clients modify one counter, and `Init` resets it for everyone. Their
+`*Session` objects remain distinct because `Authorize` still creates one per
+connection. Object scope and context-value scope are controlled separately by
+where the application constructs them.
+
 `Router.Mount("counter", methods)` exposes a method set as `counter.add`, etc.
 An explicitly registered `init` also accepts the bare `counter` name; construction
 does not call it automatically. No reflection or automatic exposure of exported
@@ -134,7 +420,51 @@ goroutine-local global equivalent of Python contextvars or TS AsyncLocalStorage.
 Register remote-call work in `Server.OnConnect`, after the reader starts;
 factories configure routes and dependencies before network calls are allowed.
 
+Register connection hooks before starting the HTTP server. For example, inside
+the tutorial's server `main`, after constructing `rpc`:
+
+```go
+rpc.OnConnect.Connect(func(ctx context.Context, peer *wsrpc.Peer) error {
+    session, _ := SessionKey.Get(ctx)
+    _, hasCall := wsrpc.Current(ctx)
+    logger.Printf("connected user=%q peer=%s hasCall=%t", session.User, peer.ID, hasCall)
+    return nil // hasCall is false: this is a connection event, not an RPC call.
+})
+```
+
+`ContextKey[T].With` preserves parent cancellation and supports nil/zero values;
+`Get` distinguishes an absent value from a stored nil/zero. It checks the value
+against the key's type at compile time. The full session example above uses
+`ContextKey[*Session]` so helpers share one mutable object, protected by its mutex.
+
+From the WSRPC Go repository, run the [objects/context demo](examples/objects/README.md)
+to follow HTTP context through the factory, stateful methods and a reverse call:
+
+```sh
+go run ./examples/objects
+# Another terminal:
+go run ./examples/objects -url 'ws://127.0.0.1:8000/ws/?name=alice'
+```
+
 ## Events, errors and shutdown
+
+The server example returns `*wsrpc.Failure` when `Init` receives a negative
+value. At a client call site, inspect remote failures separately from a local
+timeout (add the standard `errors` import):
+
+```go
+_, err = init.Call(ctx, api.Value{Value: -1})
+var remote *wsrpc.RemoteError
+switch {
+case errors.As(err, &remote):
+    fmt.Println(remote.Error()) // initial value must be nonnegative
+    fmt.Println(string(remote.Payload)) // {"type":"InvalidValue","message":...}
+case errors.Is(err, context.DeadlineExceeded):
+    fmt.Println("local wait timed out; the connection remains open")
+case err != nil:
+    return err
+}
+```
 
 - `peer.Emit(ctx, map[string]any{...})` sends an event without an `id`.
 - `peer.SendRaw(ctx, bytes, true)` sends a binary message.

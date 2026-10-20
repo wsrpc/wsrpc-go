@@ -17,6 +17,16 @@ type EchoResult struct {
 	Text string `json:"text"`
 }
 
+var (
+	Echo     = wsrpc.Define[EchoParams, EchoResult]("echo")
+	Callback = wsrpc.Define[Value, int]("callback")
+	Double   = wsrpc.Define[Value, int]("double")
+)
+
+type Value struct {
+	Value int `json:"value"`
+}
+
 func (s *EchoService) Echo(_ context.Context, p EchoParams) (EchoResult, error) {
 	return EchoResult{Text: s.Prefix + p.Text}, nil
 }
@@ -24,14 +34,12 @@ func (s *EchoService) Echo(_ context.Context, p EchoParams) (EchoResult, error) 
 func main() {
 	routes := new(wsrpc.Router)
 	service := &EchoService{Prefix: "Hello, "}
-	if err := routes.Handle("echo", service.Echo); err != nil {
+	if err := Echo.Handle(routes, service.Echo); err != nil {
 		log.Fatal(err)
 	}
-	if err := routes.Handle("callback", func(ctx context.Context, p struct {
-		Value int `json:"value"`
-	}) (int, error) {
+	if err := Callback.Handle(routes, func(ctx context.Context, p Value) (int, error) {
 		peer, _ := wsrpc.FromContext(ctx)
-		return peer.Call[int](ctx, "double", p)
+		return Double.Call(ctx, peer, p)
 	}); err != nil {
 		log.Fatal(err)
 	}
