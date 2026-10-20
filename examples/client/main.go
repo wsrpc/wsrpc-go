@@ -18,7 +18,7 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	routes := new(wsrpc.Router)
-	if err := routes.Handle("double", func(_ context.Context, p demo.Value) (int, error) { return p.Value * 2, nil }); err != nil {
+	if err := demo.Double.Handle(routes, func(_ context.Context, p demo.Value) (int, error) { return p.Value * 2, nil }); err != nil {
 		log.Fatal(err)
 	}
 	client, err := ws.Dial(ctx, *url, wsrpc.Options{Routes: routes})
@@ -26,15 +26,16 @@ func main() {
 		log.Fatal(err)
 	}
 	defer func() { _ = client.Close(); client.Wait() }()
+	// The legacy echo route accepts arbitrary JSON; select a typed view here.
 	echo, err := client.Call[struct {
 		Text  string `json:"text"`
 		Value int    `json:"value"`
-	}](ctx, "echo", map[string]any{"text": "Привет 🐍", "value": 0})
+	}](ctx, demo.Echo.Name(), map[string]any{"text": "Привет 🐍", "value": 0})
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Echo: %s %d\n", echo.Text, echo.Value)
-	result, err := client.Method[demo.Value, int]("callback").Call(ctx, demo.Value{Value: 21})
+	result, err := demo.Callback.Bind(client).Call(ctx, demo.Value{Value: 21})
 	if err != nil || result != 42 {
 		log.Fatalf("callback mismatch: %d %v", result, err)
 	}

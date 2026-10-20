@@ -11,7 +11,8 @@ Public source APIs use the host language's conventions.
 | Already initialized objects and DI         | Register bound Go methods on the same pointer                     | 40 concurrent reverse calls through one shared object               |
 | Per-connection route objects               | `Options.Factory`; synchronized receiver state                    | Two live connections have separate counters                         |
 | Call context                               | Explicit `context.Context`, `Current` and `FromContext`           | Isolation across calls, peers and helper goroutines                 |
-| Typed handlers and results                 | Go 1.27 generic methods, `Method[P,R]`                            | Positive builds and three negative consumer compilations            |
+| Typed handlers and results                 | Shared `Procedure[P,R]`, generic `Handle` / `Call` / `Bind`        | Positive builds and seven negative consumer compilations            |
+| Local connection values                    | `ContextKey[T]`, typed `With` / `Get`                             | HTTP→factory→handler→callback demo; key identity/nil/cancellation tests |
 | Dynamic JS/Python proxy syntax             | `Remote(namespace).Call[R]` or typed method handles               | Namespaced call in race suite                                       |
 | Exposure / noproxy / prefix routes         | Explicit allowlist; application chooses names                     | Unregistered methods rejected, no reflection exposure               |
 | Runtime route replacement/removal          | `Peer.Handle`, `DeleteRoute`                                      | Replacement/deletion test; in-flight handlers retain their binding  |
@@ -28,14 +29,17 @@ Important semantic differences:
 - Go has no supported ambient goroutine-local equivalent of contextvars or
   AsyncLocalStorage. The approved design passes context explicitly. Do not use
   goroutine-ID hacks or mutate a shared service's socket pointer.
+  Generic context keys provide typed local values; they do not serialize a
+  context or propagate arbitrary values/deadlines to another endpoint.
 - Factory setup runs once at connection establishment. Bare route calls invoke
   `init` only when explicitly requested. Applications needing lazy construction
   can put `sync.Once` in a connection-scoped route object.
 - Handlers, events and connections execute in goroutines. Shared state needs
   ordinary Go synchronization. Cancellation is cooperative, not forced termination.
 - Go cannot synthesize typed property access such as `peer.proxy.counter.add`.
-  Typed Go wrappers may use `Method[P,R]`; a code generator is not required by the
-  runtime and is not included in the initial API.
+  Shared `Procedure[P,R]` contracts check handlers, arguments and results without
+  generation. `Bind` returns typed `Method[P,R]` handles. Named Go wrappers are
+  optional; the runtime does not generate methods or remote object references.
 - JSON structs use zero values for missing fields and ignore unknown fields.
   Required-field and business validation belongs to handlers. JSON object
   parameter names come from tags rather than Go function argument names.

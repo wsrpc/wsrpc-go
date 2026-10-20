@@ -94,18 +94,33 @@ local timeout does not forcibly cancel remote application work.
 
 ## Typed contracts and namespaces
 
-`Router.Handle` infers parameter and result types from the function or bound
-method. `Peer.Call[R]` checks the result type selected by the caller; the method
-name is still a runtime string. Bind both argument and result types with:
+Declare a route's name and parameter/result types once and share that contract
+between server and client. No schema language, generated code, or reflection is
+needed:
 
 ```go
-add := peer.Method[Value, int]("counter.add")
-value, err := add.Call(ctx, Value{Value: 2})
-// add.Call(ctx, "wrong") does not compile.
+var Add = wsrpc.Define[Value, int]("add").In("counter")
 
-value, err = peer.Remote("counter").Call[int](ctx, "add", Value{Value: 2})
+// Server: register a method on the existing stateful object.
+err := Add.Handle(routes, counter.Add)
+
+// Client: both arguments and results follow the same contract.
+value, err := Add.Call(ctx, peer, Value{Value: 2})
+// Add.Call(ctx, peer, "wrong") does not compile.
+
+// Or bind once for repeated calls on a connection:
+add := Add.Bind(peer)
+value, err = add.Call(ctx, Value{Value: 3})
 ```
 
+`Procedure[P,R]` is an immutable value independent of a connection. `In` returns
+a new descriptor with a dotted prefix; `Name` exposes its wire name. `Define`
+panics for an invalid static name. `Handle` checks the handler signature at compile
+time and returns an error for invalid/duplicate registration. The zero descriptor
+is invalid. Binding a contract borrows a peer and creates no remote object.
+
+The lower-level `Router.Handle`, `Peer.Call[R]`, `Peer.Method[P,R]`, and
+`Remote(namespace).Call[R]` remain available for runtime-selected routes.
 Go has no JavaScript-style dynamic property proxy. Named Go methods can wrap
 these typed handles when your application needs `counter.Add(ctx, args)`.
 Type information does not validate an independently deployed server's schema;
@@ -133,6 +148,32 @@ goroutine-local global equivalent of Python contextvars or TS AsyncLocalStorage.
 `peer.Context()` is the connection lifetime and has no individual call metadata.
 Register remote-call work in `Server.OnConnect`, after the reader starts;
 factories configure routes and dependencies before network calls are allowed.
+
+For local context values, use one shared generic key instead of type assertions:
+
+```go
+var UserKey = wsrpc.NewContextKey[User]("user")
+
+// In ServerOptions.Authorize, after application authentication:
+ctx := UserKey.With(request.Context(), user)
+// Return ctx from Authorize. In Factory: UserKey.Get(peer.Context()).
+// In a handler or helper:
+user, ok := UserKey.Get(ctx)
+```
+
+Keys have unique identities even when their diagnostic names match. `With`
+preserves parent cancellation and supports nil/zero values; `Get` distinguishes
+an absent value from a stored nil/zero. Mutable values still need synchronization.
+Context values are local to each endpoint and are never serialized into calls.
+
+Run the [objects/context demo](examples/objects/README.md) to follow HTTP context
+through the connection factory, stateful methods and a reverse call:
+
+```sh
+go run ./examples/objects
+# Another terminal:
+go run ./examples/objects -url 'ws://127.0.0.1:8000/ws/?name=alice'
+```
 
 ## Events, errors and shutdown
 

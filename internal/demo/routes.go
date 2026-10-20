@@ -41,21 +41,21 @@ func (s *EchoService) Echo(_ context.Context, p map[string]any) (map[string]any,
 func NewServer() (*ws.Server, error) {
 	routes := new(wsrpc.Router)
 	service := &EchoService{Label: "ready"}
-	if err := routes.Handle("echo", service.Echo); err != nil {
+	if err := Echo.Handle(routes, service.Echo); err != nil {
 		return nil, err
 	}
 	reverse := func(ctx context.Context, p Value) (int, error) {
 		peer, _ := wsrpc.FromContext(ctx)
-		return peer.Call[int](ctx, "double", p)
+		return Double.Call(ctx, peer, p)
 	}
-	for _, name := range []string{"reverse", "callback"} {
-		if err := routes.Handle(name, reverse); err != nil {
+	for _, method := range []wsrpc.Procedure[Value, int]{Reverse, Callback} {
+		if err := method.Handle(routes, reverse); err != nil {
 			return nil, err
 		}
 	}
 	if err := routes.Handle("deferredCallback", func(ctx context.Context, p Value) (int, error) {
 		peer, _ := wsrpc.FromContext(ctx)
-		return peer.Call[int](ctx, "deferred", p)
+		return Deferred.Call(ctx, peer, p)
 	}); err != nil {
 		return nil, err
 	}
@@ -76,10 +76,10 @@ func NewServer() (*ws.Server, error) {
 	return ws.NewServer(ws.ServerOptions{Peer: wsrpc.Options{Routes: routes, Factory: func(peer *wsrpc.Peer, r *wsrpc.Router) (func(), error) {
 		counter := new(Counter)
 		methods := new(wsrpc.Router)
-		if err := methods.Handle("init", counter.Init); err != nil {
+		if err := Init.Handle(methods, counter.Init); err != nil {
 			return nil, err
 		}
-		if err := methods.Handle("add", counter.Add); err != nil {
+		if err := Add.Handle(methods, counter.Add); err != nil {
 			return nil, err
 		}
 		if err := r.Mount("counter", methods); err != nil {
