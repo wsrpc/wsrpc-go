@@ -12,6 +12,7 @@ Public source APIs use the host language's conventions.
 | Per-connection route objects               | `Options.Factory`; synchronized receiver state                    | Two live connections have separate counters                         |
 | Call context                               | Explicit `context.Context`, `Current` and `FromContext`           | Isolation across calls, peers and helper goroutines                 |
 | Typed handlers and results                 | Go 1.27 generic methods, `Method[P,R]`                            | Positive builds and three negative consumer compilations            |
+| Generated protobuf/gRPC Go contracts       | Optional `wsrpcgrpc`, standard generated unary clients/services   | Generated code over real WebSockets; reverse calls, protojson/status tests |
 | Dynamic JS/Python proxy syntax             | `Remote(namespace).Call[R]` or typed method handles               | Namespaced call in race suite                                       |
 | Exposure / noproxy / prefix routes         | Explicit allowlist; application chooses names                     | Unregistered methods rejected, no reflection exposure               |
 | Runtime route replacement/removal          | `Peer.Handle`, `DeleteRoute`                                      | Replacement/deletion test; in-flight handlers retain their binding  |
@@ -35,7 +36,8 @@ Important semantic differences:
   ordinary Go synchronization. Cancellation is cooperative, not forced termination.
 - Go cannot synthesize typed property access such as `peer.proxy.counter.add`.
   Typed Go wrappers may use `Method[P,R]`; a code generator is not required by the
-  runtime and is not included in the initial API.
+  runtime. The optional `wsrpcgrpc` adapter accepts standard `protoc-gen-go` and
+  `protoc-gen-go-grpc` output for named unary calls and server interfaces.
 - JSON structs use zero values for missing fields and ignore unknown fields.
   Required-field and business validation belongs to handlers. JSON object
   parameter names come from tags rather than Go function argument names.
@@ -46,9 +48,11 @@ Important semantic differences:
   exercised against the Go server.
 
 The transport-independent core can be adapted to another Go WebSocket library
-without changing routes or messages. HTTP adapters for non-net/http frameworks,
-alternate wire codecs and generated remote stubs are extension points, not
-claims of completed integrations.
+without changing routes or messages. HTTP adapters for non-net/http frameworks
+and alternate wire codecs remain extension points. The optional
+[`wsrpcgrpc` adapter](wsrpcgrpc/README.md) provides generated Go unary stubs over
+WSRPC, with explicit limits on streaming, metadata and remote cancellation;
+it does not implement the gRPC HTTP/2 wire protocol.
 
 Language references: [Go contexts](https://pkg.go.dev/context),
 [goroutine identity](https://go.dev/doc/faq#goroutines),
