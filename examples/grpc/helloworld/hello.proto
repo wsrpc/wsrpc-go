@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package helloworld;
+
+option go_package = "github.com/wsrpc/wsrpc-go/examples/grpc/helloworld";
+
+service Greeter {
+  rpc SayHello(HelloRequest) returns (HelloReply);
+  rpc Reverse(HelloRequest) returns (HelloReply);
+}
+
+// Used to demonstrate explicit rejection of streaming by the unary adapter.
+service StreamingGreeter {
+  rpc Chat(stream HelloRequest) returns (stream HelloReply);
+}
+
+message HelloRequest {
+  string name = 1;
+  int64 sequence = 2;
+  bytes payload = 3;
+  enum Tone {
+    NORMAL = 0;
+    LOUD = 1;
+  }
+  Tone tone = 4;
+  oneof selection {
+    string label = 5;
+    int32 index = 6;
+  }
+  repeated string tags = 7;
+  map<string, string> attributes = 8;
+}
+
+message HelloReply {
+  string message = 1;
+  HelloRequest echo = 2;
+}

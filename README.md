@@ -8,6 +8,8 @@ methods, make calls, return errors, and exchange events or binary messages.
 Requires **Go 1.27+** for generic methods. The root `wsrpc` package uses the
 standard library; the `ws` adapter uses
 [`github.com/coder/websocket`](https://pkg.go.dev/github.com/coder/websocket).
+The optional [`wsrpcgrpc` adapter](wsrpcgrpc/README.md) runs standard generated
+gRPC Go unary clients and services over the same WSRPC connection.
 
 ```sh
 go get github.com/wsrpc/wsrpc-go@main
@@ -108,6 +110,16 @@ value, err = peer.Remote("counter").Call[int](ctx, "add", Value{Value: 2})
 
 Go has no JavaScript-style dynamic property proxy. Named Go methods can wrap
 these typed handles when your application needs `counter.Add(ctx, args)`.
+For generated named methods and shared protobuf contracts, use
+[`wsrpcgrpc`](wsrpcgrpc/README.md):
+
+```go
+pb.RegisterGreeterServer(wsrpcgrpc.NewRegistrar(routes), service)
+client := pb.NewGreeterClient(wsrpcgrpc.NewClientConn(peer))
+reply, err := client.SayHello(ctx, &pb.HelloRequest{Name: "Go"})
+```
+
+See the runnable [gRPC example](examples/grpc/main.go), including reverse calls.
 Type information does not validate an independently deployed server's schema;
 JSON decoding errors still return normally at runtime.
 

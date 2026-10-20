@@ -25,6 +25,26 @@ jobs:
       - run: git diff --exit-code
       - run: go vet ./...
       - run: go test -race ./...
+  codegen:
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.27.x"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          version: "0.13.1"
+          python-version: "3.14"
+      - run: go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+      - run: go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.6.2
+      - run: >-
+          uv run --with grpcio-tools==1.84.0 python -m grpc_tools.protoc -I .
+          --go_out=. --go_opt=paths=source_relative
+          --go-grpc_out=. --go-grpc_opt=paths=source_relative
+          examples/grpc/helloworld/hello.proto
+      - run: git diff --exit-code -- examples/grpc/helloworld
   interoperability:
     timeout-minutes: 15
     runs-on: ubuntu-latest
